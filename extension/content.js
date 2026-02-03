@@ -42,15 +42,21 @@ async function startScraping() {
 
   sendStatus(`Scraping ${pageType} page...`, 'info');
 
-  // First pass: collect usernames from the list
-  let candidates = [];
+  const BATCH_SIZE = 5;
+  const fetchedUsers = new Set();
   let processedCells = new Set();
+  let noNewUsersCount = 0;
+  const MAX_NO_NEW_USERS = 3; // Stop after 3 scrolls with no new users
 
-  while (isRunning && candidates.length < settings.limit * 2) {
+  // Keep collecting and fetching until we have enough matches
+  while (isRunning && collectedCount < settings.limit) {
+    // Collect a batch of candidates from current view
+    const candidates = [];
     const cells = document.querySelectorAll('[data-testid="UserCell"]');
 
     for (const cell of cells) {
-      // Use cell's position/content as unique identifier
+      if (candidates.length >= BATCH_SIZE) break;
+
       const cellId = cell.textContent?.slice(0, 100);
       if (processedCells.has(cellId)) continue;
       processedCells.add(cellId);
@@ -69,52 +75,54 @@ async function startScraping() {
       candidates.push({ username, basicInfo });
     }
 
-    if (candidates.length >= settings.limit * 2) break;
+    // If we found candidates, fetch their details
+    if (candidates.length > 0) {
+      noNewUsersCount = 0;
+      sendStatus(`Fetching ${candidates.length} users... (${collectedCount}/${settings.limit})`, 'info');
 
-    const hasMore = await scrollAndWait();
-    if (!hasMore) break;
-  }
+      const results = await Promise.all(
+        candidates.map(({ username, basicInfo }) =>
+          fetchUserWithCounts(username, basicInfo).catch(err => {
+            console.error(`Error fetching @${username}:`, err);
+            return null;
+          })
+        )
+      );
 
-  sendStatus(`Found ${candidates.length} candidates, fetching details (5 parallel)...`, 'info');
+      for (const user of results) {
+        if (!isRunning || collectedCount >= settings.limit) break;
+        if (!user) continue;
 
-  // Second pass: fetch profile pages in parallel batches
-  const BATCH_SIZE = 5;
-  const fetchedUsers = new Set(); // Track fetched to avoid duplicates
+        if (fetchedUsers.has(user.username)) continue;
+        fetchedUsers.add(user.username);
 
-  for (let i = 0; i < candidates.length && isRunning && collectedCount < settings.limit; i += BATCH_SIZE) {
-    const batch = candidates.slice(i, i + BATCH_SIZE);
-
-    sendStatus(`Fetching batch ${Math.floor(i / BATCH_SIZE) + 1}... (${collectedCount}/${settings.limit})`, 'info');
-
-    // Fetch all in parallel
-    const results = await Promise.all(
-      batch.map(({ username, basicInfo }) =>
-        fetchUserWithCounts(username, basicInfo).catch(err => {
-          console.error(`Error fetching @${username}:`, err);
-          return null;
-        })
-      )
-    );
-
-    // Process results
-    for (const user of results) {
-      if (!isRunning || collectedCount >= settings.limit) break;
-      if (!user) continue;
-
-      // Skip if already fetched (duplicate check)
-      if (fetchedUsers.has(user.username)) continue;
-      fetchedUsers.add(user.username);
-
-      // Apply follower count filter
-      if (filterByFollowers(user)) {
-        collectedCount++;
-        chrome.runtime.sendMessage({ action: 'userFound', user });
-        sendStatus(`Found: @${user.username} (${user.followersCount} followers) [${collectedCount}/${settings.limit}]`, 'info');
+        // Apply follower count filter
+        if (filterByFollowers(user)) {
+          collectedCount++;
+          chrome.runtime.sendMessage({ action: 'userFound', user });
+          sendStatus(`Found: @${user.username} (${user.followersCount} followers) [${collectedCount}/${settings.limit}]`, 'info');
+        }
       }
+
+      await sleep(200);
+    } else {
+      noNewUsersCount++;
     }
 
-    // Small delay between batches
-    await sleep(200);
+    // Check if we need more
+    if (collectedCount >= settings.limit) break;
+
+    // Scroll to load more
+    const prevHeight = document.body.scrollHeight;
+    window.scrollBy(0, window.innerHeight * 2);
+    await sleep(1500 + Math.random() * 1000);
+    const newHeight = document.body.scrollHeight;
+
+    // If no new content loaded and no new users found multiple times, stop
+    if (newHeight === prevHeight && noNewUsersCount >= MAX_NO_NEW_USERS) {
+      sendStatus('No more users to load', 'info');
+      break;
+    }
   }
 
   isRunning = false;
@@ -185,14 +193,6 @@ function filterByFollowers(user) {
   if (maxFollowers && maxFollowers < Infinity && user.followersCount > maxFollowers) return false;
 
   return true;
-}
-
-async function scrollAndWait() {
-  const previousHeight = document.body.scrollHeight;
-  window.scrollBy(0, window.innerHeight * 2);
-  await sleep(1500 + Math.random() * 1000);
-  const newHeight = document.body.scrollHeight;
-  return newHeight > previousHeight;
 }
 
 function sleep(ms) {
