@@ -56,7 +56,7 @@ async function startScraping() {
         // Get basic info from cell
         const basicInfo = extractBasicInfoFromCell(cell, username);
 
-        // Pre-filter by keyword if set (skip users that don't match)
+        // Pre-filter by keyword if set
         if (settings.keyword && !matchesKeyword(basicInfo, settings.keyword)) {
           continue;
         }
@@ -73,19 +73,28 @@ async function startScraping() {
 
   sendStatus(`Found ${usernames.length} candidates, fetching details...`, 'info');
 
-  // Second pass: fetch profile pages to get follower counts
+  // Second pass: fetch profile pages via background script
   for (const { username, basicInfo } of usernames) {
     if (!isRunning || collectedCount >= settings.limit) break;
 
     sendStatus(`Fetching @${username}... (${collectedCount}/${settings.limit})`, 'info');
 
     try {
-      const counts = await fetchUserCounts(username);
+      // Ask background script to open tab and get counts
+      const response = await chrome.runtime.sendMessage({
+        action: 'fetchUserCounts',
+        username: username,
+      });
+
+      if (!response.success) {
+        console.error(`Error fetching @${username}:`, response.error);
+        continue;
+      }
 
       const user = {
         ...basicInfo,
-        followersCount: counts.followers,
-        followingCount: counts.following,
+        followersCount: response.counts.followers,
+        followingCount: response.counts.following,
       };
 
       // Apply follower count filter
@@ -95,8 +104,8 @@ async function startScraping() {
         sendStatus(`Found: @${username} (${user.followersCount} followers) [${collectedCount}/${settings.limit}]`, 'info');
       }
 
-      // Delay between requests
-      await sleep(500 + Math.random() * 500);
+      // Delay between fetches
+      await sleep(300);
     } catch (e) {
       console.error(`Error fetching @${username}:`, e);
     }
@@ -144,65 +153,6 @@ function matchesKeyword(basicInfo, keyword) {
   return lowerBio.includes(lowerKeyword) ||
          lowerName.includes(lowerKeyword) ||
          lowerUsername.includes(lowerKeyword);
-}
-
-async function fetchUserCounts(username) {
-  const profileUrl = `https://x.com/${username}`;
-
-  const response = await fetch(profileUrl, {
-    credentials: 'include',
-    headers: {
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-
-  const html = await response.text();
-
-  // Parse the HTML
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(html, 'text/html');
-
-  let followers = 0;
-  let following = 0;
-
-  // Find follower count link
-  const followerLink = doc.querySelector('a[href*="/verified_followers"], a[href*="/followers"]:not([href*="/following"])');
-  if (followerLink) {
-    const text = followerLink.textContent || '';
-    followers = parseCount(text);
-  }
-
-  // Find following count link
-  const followingLink = doc.querySelector('a[href*="/following"]');
-  if (followingLink) {
-    const text = followingLink.textContent || '';
-    following = parseCount(text);
-  }
-
-  return { followers, following };
-}
-
-function parseCount(text) {
-  if (!text) return 0;
-
-  // Extract numbers from text like "4,057 フォロワー" or "1.5M Followers"
-  const match = text.match(/([\d,.]+)\s*([KMB万億])?/i);
-  if (!match) return 0;
-
-  let num = parseFloat(match[1].replace(/,/g, ''));
-  const suffix = (match[2] || '').toUpperCase();
-
-  if (suffix === 'K') num *= 1000;
-  else if (suffix === 'M') num *= 1000000;
-  else if (suffix === 'B') num *= 1000000000;
-  else if (suffix === '万') num *= 10000;
-  else if (suffix === '億') num *= 100000000;
-
-  return Math.floor(num);
 }
 
 function filterByFollowers(user) {
