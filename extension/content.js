@@ -18,7 +18,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function startScraping() {
   sendStatus('Starting...', 'info');
 
-  // Determine page type
   const url = window.location.href;
   let pageType = 'unknown';
 
@@ -43,41 +42,63 @@ async function startScraping() {
 
   sendStatus(`Scraping ${pageType} page...`, 'info');
 
-  while (isRunning && collectedCount < settings.limit) {
-    // Get user cells from current view
+  // First pass: collect usernames from the list
+  let usernames = [];
+
+  while (isRunning && usernames.length < settings.limit * 2) {
     const cells = document.querySelectorAll('[data-testid="UserCell"]');
 
     for (const cell of cells) {
-      if (!isRunning || collectedCount >= settings.limit) break;
-
       const username = extractUsernameFromCell(cell);
-      if (!username || seenUsers.has(username)) continue;
-      seenUsers.add(username);
+      if (username && !seenUsers.has(username)) {
+        seenUsers.add(username);
 
-      sendStatus(`Fetching @${username}...`, 'info');
+        // Get basic info from cell
+        const basicInfo = extractBasicInfoFromCell(cell, username);
 
-      // Hover to get follower count
-      const user = await extractUserWithHover(cell, username);
-      if (!user) continue;
+        // Pre-filter by keyword if set (skip users that don't match)
+        if (settings.keyword && !matchesKeyword(basicInfo, settings.keyword)) {
+          continue;
+        }
 
-      // Apply filters
-      if (filterUser(user)) {
-        collectedCount++;
-        chrome.runtime.sendMessage({ action: 'userFound', user });
-        sendStatus(`Found: @${username} (${collectedCount}/${settings.limit})`, 'info');
+        usernames.push({ username, basicInfo });
       }
-
-      // Small delay between hovers
-      await sleep(300 + Math.random() * 200);
     }
 
+    if (usernames.length >= settings.limit * 2) break;
+
+    const hasMore = await scrollAndWait();
+    if (!hasMore) break;
+  }
+
+  sendStatus(`Found ${usernames.length} candidates, fetching details...`, 'info');
+
+  // Second pass: fetch profile pages to get follower counts
+  for (const { username, basicInfo } of usernames) {
     if (!isRunning || collectedCount >= settings.limit) break;
 
-    // Scroll to load more
-    const hasMore = await scrollAndWait();
-    if (!hasMore) {
-      sendStatus('No more users to load', 'info');
-      break;
+    sendStatus(`Fetching @${username}... (${collectedCount}/${settings.limit})`, 'info');
+
+    try {
+      const counts = await fetchUserCounts(username);
+
+      const user = {
+        ...basicInfo,
+        followersCount: counts.followers,
+        followingCount: counts.following,
+      };
+
+      // Apply follower count filter
+      if (filterByFollowers(user)) {
+        collectedCount++;
+        chrome.runtime.sendMessage({ action: 'userFound', user });
+        sendStatus(`Found: @${username} (${user.followersCount} followers) [${collectedCount}/${settings.limit}]`, 'info');
+      }
+
+      // Delay between requests
+      await sleep(500 + Math.random() * 500);
+    } catch (e) {
+      console.error(`Error fetching @${username}:`, e);
     }
   }
 
@@ -96,8 +117,7 @@ function extractUsernameFromCell(cell) {
   return null;
 }
 
-async function extractUserWithHover(cell, username) {
-  // Get basic info from cell
+function extractBasicInfoFromCell(cell, username) {
   let displayName = '';
   const nameContainer = cell.querySelector(`a[href="/${username}"] span`);
   if (nameContainer) {
@@ -107,155 +127,97 @@ async function extractUserWithHover(cell, username) {
   const bioEl = cell.querySelector('[data-testid="UserDescription"]');
   const bio = bioEl?.textContent || '';
 
-  // Find the link to hover over (username link)
-  const userLink = cell.querySelector(`a[href="/${username}"]`);
-  if (!userLink) {
-    return {
-      username,
-      displayName: displayName || username,
-      bio,
-      followersCount: 0,
-      followingCount: 0,
-      profileUrl: `https://x.com/${username}`,
-    };
-  }
-
-  // Trigger hover
-  const rect = userLink.getBoundingClientRect();
-  const mouseEnterEvent = new MouseEvent('mouseenter', {
-    bubbles: true,
-    cancelable: true,
-    clientX: rect.left + rect.width / 2,
-    clientY: rect.top + rect.height / 2,
-  });
-  userLink.dispatchEvent(mouseEnterEvent);
-
-  // Wait for popup to appear
-  let followersCount = 0;
-  let followingCount = 0;
-
-  for (let i = 0; i < 20; i++) { // Max 2 seconds wait
-    await sleep(100);
-
-    // Look for the hover card popup
-    const hoverCard = document.querySelector('[data-testid="HoverCard"]');
-    if (hoverCard) {
-      const counts = extractCountsFromHoverCard(hoverCard);
-      followersCount = counts.followersCount;
-      followingCount = counts.followingCount;
-      break;
-    }
-  }
-
-  // Remove hover
-  const mouseLeaveEvent = new MouseEvent('mouseleave', {
-    bubbles: true,
-    cancelable: true,
-  });
-  userLink.dispatchEvent(mouseLeaveEvent);
-
-  // Wait for popup to disappear
-  await sleep(100);
-
   return {
     username,
     displayName: displayName || username,
     bio,
-    followersCount,
-    followingCount,
     profileUrl: `https://x.com/${username}`,
   };
 }
 
-function extractCountsFromHoverCard(hoverCard) {
-  let followersCount = 0;
-  let followingCount = 0;
+function matchesKeyword(basicInfo, keyword) {
+  const lowerKeyword = keyword.toLowerCase();
+  const lowerBio = (basicInfo.bio || '').toLowerCase();
+  const lowerName = (basicInfo.displayName || '').toLowerCase();
+  const lowerUsername = (basicInfo.username || '').toLowerCase();
 
-  // Find links containing follower/following counts
-  const links = hoverCard.querySelectorAll('a[href*="/followers"], a[href*="/following"], a[href*="/verified_followers"]');
+  return lowerBio.includes(lowerKeyword) ||
+         lowerName.includes(lowerKeyword) ||
+         lowerUsername.includes(lowerKeyword);
+}
 
-  links.forEach(link => {
-    const href = link.getAttribute('href') || '';
-    const text = link.textContent || '';
+async function fetchUserCounts(username) {
+  const profileUrl = `https://x.com/${username}`;
 
-    if (href.includes('/followers') || href.includes('/verified_followers')) {
-      if (!href.includes('/following')) {
-        followersCount = parseCount(text);
-      }
-    }
-    if (href.includes('/following')) {
-      followingCount = parseCount(text);
-    }
+  const response = await fetch(profileUrl, {
+    credentials: 'include',
+    headers: {
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    },
   });
 
-  // Also try to find counts in span elements
-  if (followersCount === 0 || followingCount === 0) {
-    const spans = hoverCard.querySelectorAll('span');
-    spans.forEach(span => {
-      const text = span.textContent || '';
-      if (text.match(/followers?$/i)) {
-        const count = parseCount(text);
-        if (count > 0) followersCount = count;
-      }
-      if (text.match(/following$/i)) {
-        const count = parseCount(text);
-        if (count > 0) followingCount = count;
-      }
-    });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
   }
 
-  return { followersCount, followingCount };
+  const html = await response.text();
+
+  // Parse the HTML
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+
+  let followers = 0;
+  let following = 0;
+
+  // Find follower count link
+  const followerLink = doc.querySelector('a[href*="/verified_followers"], a[href*="/followers"]:not([href*="/following"])');
+  if (followerLink) {
+    const text = followerLink.textContent || '';
+    followers = parseCount(text);
+  }
+
+  // Find following count link
+  const followingLink = doc.querySelector('a[href*="/following"]');
+  if (followingLink) {
+    const text = followingLink.textContent || '';
+    following = parseCount(text);
+  }
+
+  return { followers, following };
 }
 
 function parseCount(text) {
   if (!text) return 0;
 
-  // Match patterns like "1,234", "1.2K", "1.5M", "12万"
+  // Extract numbers from text like "4,057 フォロワー" or "1.5M Followers"
   const match = text.match(/([\d,.]+)\s*([KMB万億])?/i);
   if (!match) return 0;
 
   let num = parseFloat(match[1].replace(/,/g, ''));
   const suffix = (match[2] || '').toUpperCase();
 
-  if (suffix === 'K' || suffix === '万') num *= 1000;
-  else if (suffix === 'M' || suffix === '億') num *= 1000000;
+  if (suffix === 'K') num *= 1000;
+  else if (suffix === 'M') num *= 1000000;
   else if (suffix === 'B') num *= 1000000000;
+  else if (suffix === '万') num *= 10000;
+  else if (suffix === '億') num *= 100000000;
 
   return Math.floor(num);
 }
 
-function filterUser(user) {
-  const { keyword, minFollowers, maxFollowers } = settings;
+function filterByFollowers(user) {
+  const { minFollowers, maxFollowers } = settings;
 
-  // Follower count filter
   if (minFollowers > 0 && user.followersCount < minFollowers) return false;
   if (maxFollowers && maxFollowers < Infinity && user.followersCount > maxFollowers) return false;
-
-  // Keyword filter
-  if (keyword) {
-    const lowerKeyword = keyword.toLowerCase();
-    const lowerBio = (user.bio || '').toLowerCase();
-    const lowerName = (user.displayName || '').toLowerCase();
-    const lowerUsername = (user.username || '').toLowerCase();
-
-    if (!lowerBio.includes(lowerKeyword) &&
-        !lowerName.includes(lowerKeyword) &&
-        !lowerUsername.includes(lowerKeyword)) {
-      return false;
-    }
-  }
 
   return true;
 }
 
 async function scrollAndWait() {
   const previousHeight = document.body.scrollHeight;
-
   window.scrollBy(0, window.innerHeight * 2);
-
-  // Wait for content to load
   await sleep(1500 + Math.random() * 1000);
-
   const newHeight = document.body.scrollHeight;
   return newHeight > previousHeight;
 }
