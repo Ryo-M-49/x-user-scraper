@@ -29,7 +29,6 @@ async function startScraping() {
   } else if (url.includes('/following')) {
     pageType = 'following';
   } else if (url.includes('/search')) {
-    // Redirect to user search
     sendStatus('Switching to People tab...', 'info');
     const newUrl = url.includes('f=') ? url.replace(/f=\w+/, 'f=user') : url + '&f=user';
     window.location.href = newUrl;
@@ -45,19 +44,31 @@ async function startScraping() {
   sendStatus(`Scraping ${pageType} page...`, 'info');
 
   while (isRunning && collectedCount < settings.limit) {
-    // Extract users from current view
-    const users = extractUsersFromPage();
+    // Get user cells from current view
+    const cells = document.querySelectorAll('[data-testid="UserCell"]');
 
-    for (const user of users) {
+    for (const cell of cells) {
       if (!isRunning || collectedCount >= settings.limit) break;
-      if (seenUsers.has(user.username)) continue;
-      seenUsers.add(user.username);
+
+      const username = extractUsernameFromCell(cell);
+      if (!username || seenUsers.has(username)) continue;
+      seenUsers.add(username);
+
+      sendStatus(`Fetching @${username}...`, 'info');
+
+      // Hover to get follower count
+      const user = await extractUserWithHover(cell, username);
+      if (!user) continue;
 
       // Apply filters
       if (filterUser(user)) {
         collectedCount++;
         chrome.runtime.sendMessage({ action: 'userFound', user });
+        sendStatus(`Found: @${username} (${collectedCount}/${settings.limit})`, 'info');
       }
+
+      // Small delay between hovers
+      await sleep(300 + Math.random() * 200);
     }
 
     if (!isRunning || collectedCount >= settings.limit) break;
@@ -74,57 +85,77 @@ async function startScraping() {
   chrome.runtime.sendMessage({ action: 'done' });
 }
 
-function extractUsersFromPage() {
-  const users = [];
-  const cells = document.querySelectorAll('[data-testid="UserCell"]');
-
-  cells.forEach(cell => {
-    try {
-      const user = extractUserFromCell(cell);
-      if (user) users.push(user);
-    } catch (e) {
-      console.error('Error extracting user:', e);
-    }
-  });
-
-  return users;
-}
-
-function extractUserFromCell(cell) {
-  // Find the username link
+function extractUsernameFromCell(cell) {
   const links = cell.querySelectorAll('a[href^="/"]');
-  let username = '';
-  let profileUrl = '';
-
   for (const link of links) {
     const href = link.getAttribute('href');
-    // Skip non-user links
-    if (href && !href.includes('/') && href.length > 1) {
-      continue;
-    }
-    // Find the @username link
     if (href && href.match(/^\/[a-zA-Z0-9_]+$/)) {
-      username = href.slice(1);
-      profileUrl = `https://x.com${href}`;
-      break;
+      return href.slice(1);
     }
   }
+  return null;
+}
 
-  if (!username) return null;
-
-  // Display name - look for the first span with dir="ltr" or "auto" that contains text
+async function extractUserWithHover(cell, username) {
+  // Get basic info from cell
   let displayName = '';
-  const nameContainer = cell.querySelector('a[href="/' + username + '"] span');
+  const nameContainer = cell.querySelector(`a[href="/${username}"] span`);
   if (nameContainer) {
     displayName = nameContainer.textContent || '';
   }
 
-  // Bio
   const bioEl = cell.querySelector('[data-testid="UserDescription"]');
   const bio = bioEl?.textContent || '';
 
-  // Try to extract follower count from cell if available
-  const { followersCount, followingCount } = extractCountsFromCell(cell);
+  // Find the link to hover over (username link)
+  const userLink = cell.querySelector(`a[href="/${username}"]`);
+  if (!userLink) {
+    return {
+      username,
+      displayName: displayName || username,
+      bio,
+      followersCount: 0,
+      followingCount: 0,
+      profileUrl: `https://x.com/${username}`,
+    };
+  }
+
+  // Trigger hover
+  const rect = userLink.getBoundingClientRect();
+  const mouseEnterEvent = new MouseEvent('mouseenter', {
+    bubbles: true,
+    cancelable: true,
+    clientX: rect.left + rect.width / 2,
+    clientY: rect.top + rect.height / 2,
+  });
+  userLink.dispatchEvent(mouseEnterEvent);
+
+  // Wait for popup to appear
+  let followersCount = 0;
+  let followingCount = 0;
+
+  for (let i = 0; i < 20; i++) { // Max 2 seconds wait
+    await sleep(100);
+
+    // Look for the hover card popup
+    const hoverCard = document.querySelector('[data-testid="HoverCard"]');
+    if (hoverCard) {
+      const counts = extractCountsFromHoverCard(hoverCard);
+      followersCount = counts.followersCount;
+      followingCount = counts.followingCount;
+      break;
+    }
+  }
+
+  // Remove hover
+  const mouseLeaveEvent = new MouseEvent('mouseleave', {
+    bubbles: true,
+    cancelable: true,
+  });
+  userLink.dispatchEvent(mouseLeaveEvent);
+
+  // Wait for popup to disappear
+  await sleep(100);
 
   return {
     username,
@@ -132,26 +163,45 @@ function extractUserFromCell(cell) {
     bio,
     followersCount,
     followingCount,
-    profileUrl,
+    profileUrl: `https://x.com/${username}`,
   };
 }
 
-function extractCountsFromCell(cell) {
-  // Sometimes the cell shows follower counts
+function extractCountsFromHoverCard(hoverCard) {
   let followersCount = 0;
   let followingCount = 0;
 
-  const text = cell.textContent || '';
+  // Find links containing follower/following counts
+  const links = hoverCard.querySelectorAll('a[href*="/followers"], a[href*="/following"], a[href*="/verified_followers"]');
 
-  // Try to match patterns like "1.2K Followers" or "123 Following"
-  const followersMatch = text.match(/([\d,.]+[KMB]?)\s*[Ff]ollowers?/i);
-  const followingMatch = text.match(/([\d,.]+[KMB]?)\s*[Ff]ollowing/i);
+  links.forEach(link => {
+    const href = link.getAttribute('href') || '';
+    const text = link.textContent || '';
 
-  if (followersMatch) {
-    followersCount = parseCount(followersMatch[1]);
-  }
-  if (followingMatch) {
-    followingCount = parseCount(followingMatch[1]);
+    if (href.includes('/followers') || href.includes('/verified_followers')) {
+      if (!href.includes('/following')) {
+        followersCount = parseCount(text);
+      }
+    }
+    if (href.includes('/following')) {
+      followingCount = parseCount(text);
+    }
+  });
+
+  // Also try to find counts in span elements
+  if (followersCount === 0 || followingCount === 0) {
+    const spans = hoverCard.querySelectorAll('span');
+    spans.forEach(span => {
+      const text = span.textContent || '';
+      if (text.match(/followers?$/i)) {
+        const count = parseCount(text);
+        if (count > 0) followersCount = count;
+      }
+      if (text.match(/following$/i)) {
+        const count = parseCount(text);
+        if (count > 0) followingCount = count;
+      }
+    });
   }
 
   return { followersCount, followingCount };
@@ -160,16 +210,15 @@ function extractCountsFromCell(cell) {
 function parseCount(text) {
   if (!text) return 0;
 
-  const cleanText = text.replace(/,/g, '').trim();
-  const match = cleanText.match(/([\d.]+)([KMB])?/i);
-
+  // Match patterns like "1,234", "1.2K", "1.5M", "12万"
+  const match = text.match(/([\d,.]+)\s*([KMB万億])?/i);
   if (!match) return 0;
 
-  let num = parseFloat(match[1]);
+  let num = parseFloat(match[1].replace(/,/g, ''));
   const suffix = (match[2] || '').toUpperCase();
 
-  if (suffix === 'K') num *= 1000;
-  else if (suffix === 'M') num *= 1000000;
+  if (suffix === 'K' || suffix === '万') num *= 1000;
+  else if (suffix === 'M' || suffix === '億') num *= 1000000;
   else if (suffix === 'B') num *= 1000000000;
 
   return Math.floor(num);
@@ -178,11 +227,9 @@ function parseCount(text) {
 function filterUser(user) {
   const { keyword, minFollowers, maxFollowers } = settings;
 
-  // Follower count filter (only if we have the data)
-  if (user.followersCount > 0) {
-    if (user.followersCount < minFollowers) return false;
-    if (maxFollowers && user.followersCount > maxFollowers) return false;
-  }
+  // Follower count filter
+  if (minFollowers > 0 && user.followersCount < minFollowers) return false;
+  if (maxFollowers && maxFollowers < Infinity && user.followersCount > maxFollowers) return false;
 
   // Keyword filter
   if (keyword) {
@@ -221,5 +268,4 @@ function sendStatus(text, type) {
   chrome.runtime.sendMessage({ action: 'status', text, type });
 }
 
-// Let popup know content script is ready
 console.log('X User Scraper content script loaded');
