@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      width: 320px;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+      background: #15202b;
+      color: #fff;
+    }
+    h1 {
+      font-size: 16px;
+      margin: 0 0 16px 0;
+      color: #1d9bf0;
+    }
+    .field {
+      margin-bottom: 12px;
+    }
+    label {
+      display: block;
+      margin-bottom: 4px;
+      color: #8b98a5;
+      font-size: 12px;
+    }
+    input, select {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #38444d;
+      border-radius: 4px;
+      background: #192734;
+      color: #fff;
+      font-size: 14px;
+    }
+    input:focus, select:focus {
+      outline: none;
+      border-color: #1d9bf0;
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+    }
+    .row .field {
+      flex: 1;
+    }
+    button {
+      width: 100%;
+      padding: 10px;
+      border: none;
+      border-radius: 9999px;
+      font-size: 14px;
+      font-weight: bold;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    #startBtn {
+      background: #1d9bf0;
+      color: #fff;
+    }
+    #startBtn:hover {
+      background: #1a8cd8;
+    }
+    #startBtn:disabled {
+      background: #38444d;
+      cursor: not-allowed;
+    }
+    #exportBtn {
+      background: #192734;
+      color: #1d9bf0;
+      border: 1px solid #1d9bf0;
+    }
+    #exportBtn:hover {
+      background: #1d9bf0;
+      color: #fff;
+    }
+    #status {
+      margin-top: 12px;
+      padding: 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      display: none;
+    }
+    #status.info {
+      display: block;
+      background: #192734;
+      color: #8b98a5;
+    }
+    #status.success {
+      display: block;
+      background: #1d4f36;
+      color: #71c9a0;
+    }
+    #status.error {
+      display: block;
+      background: #4f1d2a;
+      color: #f4212e;
+    }
+    #results {
+      margin-top: 12px;
+      max-height: 200px;
+      overflow-y: auto;
+      font-size: 12px;
+    }
+    .user-item {
+      padding: 8px;
+      border-bottom: 1px solid #38444d;
+    }
+    .user-item:last-child {
+      border-bottom: none;
+    }
+    .username {
+      color: #1d9bf0;
+    }
+    .followers {
+      color: #8b98a5;
+    }
+  </style>
+</head>
+<body>
+  <h1>X User Scraper</h1>
+
+  <div class="field">
+    <label>Keyword (bio/name filter)</label>
+    <input type="text" id="keyword" placeholder="e.g. TypeScript, Engineer">
+  </div>
+
+  <div class="row">
+    <div class="field">
+      <label>Min Followers</label>
+      <input type="number" id="minFollowers" value="0" min="0">
+    </div>
+    <div class="field">
+      <label>Max Followers</label>
+      <input type="number" id="maxFollowers" value="1000000" min="0">
+    </div>
+  </div>
+
+  <div class="field">
+    <label>Max Users</label>
+    <input type="number" id="limit" value="100" min="1" max="1000">
+  </div>
+
+  <button id="startBtn">Start Scraping</button>
+  <button id="exportBtn">Export TSV</button>
+
+  <div id="status"></div>
+  <div id="results"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

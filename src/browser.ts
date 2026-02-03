@@ -1,5 +1,5 @@
 import { chromium, type BrowserContext, type Page } from 'playwright';
-import { homedir } from 'os';
+import { existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 
 export interface BrowserOptions {
@@ -8,30 +8,41 @@ export interface BrowserOptions {
 }
 
 function getDefaultProfilePath(): string {
-  const home = homedir();
-  const platform = process.platform;
-
-  if (platform === 'win32') {
-    return join(home, 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
-  } else if (platform === 'darwin') {
-    return join(home, 'Library', 'Application Support', 'Google', 'Chrome');
-  } else {
-    return join(home, '.config', 'google-chrome');
+  // Use a local profile directory for this tool
+  const profileDir = join(process.cwd(), '.chrome-profile');
+  if (!existsSync(profileDir)) {
+    mkdirSync(profileDir, { recursive: true });
   }
+  return profileDir;
 }
 
 export async function launchBrowser(options: BrowserOptions): Promise<BrowserContext> {
   const profilePath = options.profilePath || getDefaultProfilePath();
 
-  console.log(`Using Chrome profile: ${profilePath}`);
+  console.error(`Using profile: ${profilePath}`);
 
   const context = await chromium.launchPersistentContext(profilePath, {
     headless: !options.headed,
-    channel: 'chrome',
     args: [
       '--disable-blink-features=AutomationControlled',
+      '--disable-dev-shm-usage',
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-infobars',
+      '--window-size=1280,800',
+      '--disable-web-security',
+      '--allow-running-insecure-content',
     ],
     viewport: { width: 1280, height: 800 },
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    ignoreDefaultArgs: ['--enable-automation'],
+  });
+
+  // Remove webdriver property
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => undefined,
+    });
   });
 
   return context;
@@ -46,14 +57,14 @@ export async function checkLoginStatus(page: Page): Promise<boolean> {
     // Check if we're on the home timeline (logged in)
     const url = page.url();
     if (url.includes('/home')) {
-      console.log('Logged in successfully');
+      console.error('Logged in successfully');
       return true;
     }
   } catch {
     // Timeout - probably not logged in
   }
 
-  console.log('Not logged in. Please log in manually in the browser.');
+  console.error('Not logged in. Please log in manually in the browser.');
   return false;
 }
 
