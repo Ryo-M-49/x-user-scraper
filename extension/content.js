@@ -43,76 +43,99 @@ async function startScraping() {
   sendStatus(`Scraping ${pageType} page...`, 'info');
 
   // First pass: collect usernames from the list
-  let usernames = [];
+  let candidates = [];
+  let processedCells = new Set();
 
-  while (isRunning && usernames.length < settings.limit * 2) {
+  while (isRunning && candidates.length < settings.limit * 2) {
     const cells = document.querySelectorAll('[data-testid="UserCell"]');
 
     for (const cell of cells) {
+      // Use cell's position/content as unique identifier
+      const cellId = cell.textContent?.slice(0, 100);
+      if (processedCells.has(cellId)) continue;
+      processedCells.add(cellId);
+
       const username = extractUsernameFromCell(cell);
-      if (username && !seenUsers.has(username)) {
-        seenUsers.add(username);
+      if (!username || seenUsers.has(username)) continue;
+      seenUsers.add(username);
 
-        // Get basic info from cell
-        const basicInfo = extractBasicInfoFromCell(cell, username);
+      const basicInfo = extractBasicInfoFromCell(cell, username);
 
-        // Pre-filter by keyword if set
-        if (settings.keyword && !matchesKeyword(basicInfo, settings.keyword)) {
-          continue;
-        }
-
-        usernames.push({ username, basicInfo });
+      // Pre-filter by keyword if set
+      if (settings.keyword && !matchesKeyword(basicInfo, settings.keyword)) {
+        continue;
       }
+
+      candidates.push({ username, basicInfo });
     }
 
-    if (usernames.length >= settings.limit * 2) break;
+    if (candidates.length >= settings.limit * 2) break;
 
     const hasMore = await scrollAndWait();
     if (!hasMore) break;
   }
 
-  sendStatus(`Found ${usernames.length} candidates, fetching details...`, 'info');
+  sendStatus(`Found ${candidates.length} candidates, fetching details (5 parallel)...`, 'info');
 
-  // Second pass: fetch profile pages via background script
-  for (const { username, basicInfo } of usernames) {
-    if (!isRunning || collectedCount >= settings.limit) break;
+  // Second pass: fetch profile pages in parallel batches
+  const BATCH_SIZE = 5;
+  const fetchedUsers = new Set(); // Track fetched to avoid duplicates
 
-    sendStatus(`Fetching @${username}... (${collectedCount}/${settings.limit})`, 'info');
+  for (let i = 0; i < candidates.length && isRunning && collectedCount < settings.limit; i += BATCH_SIZE) {
+    const batch = candidates.slice(i, i + BATCH_SIZE);
 
-    try {
-      // Ask background script to open tab and get counts
-      const response = await chrome.runtime.sendMessage({
-        action: 'fetchUserCounts',
-        username: username,
-      });
+    sendStatus(`Fetching batch ${Math.floor(i / BATCH_SIZE) + 1}... (${collectedCount}/${settings.limit})`, 'info');
 
-      if (!response.success) {
-        console.error(`Error fetching @${username}:`, response.error);
-        continue;
-      }
+    // Fetch all in parallel
+    const results = await Promise.all(
+      batch.map(({ username, basicInfo }) =>
+        fetchUserWithCounts(username, basicInfo).catch(err => {
+          console.error(`Error fetching @${username}:`, err);
+          return null;
+        })
+      )
+    );
 
-      const user = {
-        ...basicInfo,
-        followersCount: response.counts.followers,
-        followingCount: response.counts.following,
-      };
+    // Process results
+    for (const user of results) {
+      if (!isRunning || collectedCount >= settings.limit) break;
+      if (!user) continue;
+
+      // Skip if already fetched (duplicate check)
+      if (fetchedUsers.has(user.username)) continue;
+      fetchedUsers.add(user.username);
 
       // Apply follower count filter
       if (filterByFollowers(user)) {
         collectedCount++;
         chrome.runtime.sendMessage({ action: 'userFound', user });
-        sendStatus(`Found: @${username} (${user.followersCount} followers) [${collectedCount}/${settings.limit}]`, 'info');
+        sendStatus(`Found: @${user.username} (${user.followersCount} followers) [${collectedCount}/${settings.limit}]`, 'info');
       }
-
-      // Delay between fetches
-      await sleep(300);
-    } catch (e) {
-      console.error(`Error fetching @${username}:`, e);
     }
+
+    // Small delay between batches
+    await sleep(200);
   }
 
   isRunning = false;
   chrome.runtime.sendMessage({ action: 'done' });
+}
+
+async function fetchUserWithCounts(username, basicInfo) {
+  const response = await chrome.runtime.sendMessage({
+    action: 'fetchUserCounts',
+    username: username,
+  });
+
+  if (!response.success) {
+    throw new Error(response.error);
+  }
+
+  return {
+    ...basicInfo,
+    followersCount: response.counts.followers,
+    followingCount: response.counts.following,
+  };
 }
 
 function extractUsernameFromCell(cell) {

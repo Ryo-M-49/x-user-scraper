@@ -70,6 +70,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // Listen for messages from content script
   chrome.runtime.onMessage.addListener((message) => {
     if (message.action === 'userFound') {
+      // Duplicate check
+      if (collectedUsers.some(u => u.username === message.user.username)) {
+        return;
+      }
       collectedUsers.push(message.user);
       chrome.storage.local.set({ collectedUsers });
       updateResults();
