@@ -1,0 +1,35 @@
+{
+  "name": "x-user-scraper",
+  "version": "1.0.0",
+  "description": "X (Twitter) user scraper CLI tool",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "x-user-scraper": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ryo-M-49/x-user-scraper.git"
+  },
+  "keywords": ["twitter", "x", "scraper", "cli"],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Ryo-M-49/x-user-scraper/issues"
+  },
+  "homepage": "https://github.com/Ryo-M-49/x-user-scraper#readme",
+  "dependencies": {
+    "commander": "^14.0.3",
+    "playwright": "^1.58.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
